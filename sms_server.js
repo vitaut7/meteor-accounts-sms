@@ -1,12 +1,25 @@
-var sms = Accounts.sms;
+var codes = new Mongo.Collection('meteor_accounts_sms');
 
-sms.sendVerificationCode = function () {
-  throw new Error('Accounts sms has not been configured yet.');
-};
+Meteor.methods({
+  'accounts-sms.sendVerificationCode': function (phone) {
+    check(phone, String);
 
-sms.verifyCode = function () {
-  throw new Error('Accounts sms has not been configured yet.');
-};
+    return Accounts.sms.sendVerificationCode(phone);
+  }
+});
+
+// Handler to login with a phone number and code.
+Accounts.registerLoginHandler('sms', function (options) {
+  if (!options.sms) return;
+
+  check(options, {
+    sms: true,
+    phone: MatchEx.String(1),
+    code: MatchEx.String(1)
+  });
+
+  return Accounts.sms.verifyCode(options.phone, options.code);
+});
 
 /**
  * You can set the twilio from, sid and key and this
@@ -25,34 +38,67 @@ sms.verifyCode = function () {
  */
 Accounts.sms.configure = function (options) {
   check(options, Match.OneOf(
-    {twilio: {from: String, sid: String, token: String}},
-    {sendVerificationCode: MatchEx.Function(), verifyCode: MatchEx.Function()}
+    {
+      twilio: {
+        from: String,
+        sid: String,
+        token: String
+      }
+    }, {
+      lookup: MatchEx.Function(),
+      sendVerificationCode: MatchEx.Function(),
+      verifyCode: MatchEx.Function()
+    }
   ));
 
   if (options.twilio) {
-    sms.twilio.configure(options.twilio);
-    sms.sendVerificationCode = sms.twilio.sendVerificationCode;
-    sms.verifyCode = sms.twilio.verifyCode;
+    Accounts.sms.client = new Twilio(options.twilio);
   } else {
-    sms.sendVerificationCode = options.sendVerificationCode;
-    sms.verifyCode = options.verifyCode;
+    Accounts.sms.lookup = options.lookup;
+    Accounts.sms.sendVerificationCode = options.sendVerificationCode;
+    Accounts.sms.verifyCode = options.verifyCode;
   }
 };
 
-Meteor.methods({
-  'accounts-sms.sendVerificationCode': function (phone) {
-    check(phone, String);
+/**
+ * Send a 4 digit verification sms with twilio.
+ * @param phone
+ */
+Accounts.sms.sendVerificationCode = function (phone) {
+  if (!Accounts.sms.client) throw new Meteor.Error('accounts-sms has not been configured');
 
-    Accounts.sms.sendVerificationCode(phone);
+  var lookup = Accounts.sms.client.lookup(phone);
+  if (lookup.carrier && lookup.carrier.type !== 'mobile') {
+    throw new Meteor.Error('not a mobile number');
   }
-});
 
-// Handler to login with a phone number and code.
-Accounts.registerLoginHandler('sms', function (options) {
-  check(options, {
-    phone: MatchEx.String(1),
-    code: MatchEx.String(1)
+  var code = Math.floor(Random.fraction() * 10000) + '';
+
+  // Clear out existing codes
+  codes.remove({phone: phone});
+
+  // Generate a new code.
+  codes.insert({phone: phone, code: code});
+
+  Accounts.sms.client.sendSMS({
+    to: phone,
+    body: 'Your verification code is ' + code
   });
+};
 
-  return Accounts.sms.verifyCode(options.phone, options.code);
-});
+/**
+ * Send a 4 digit verification sms with twilio.
+ * @param phone
+ * @param code
+ */
+Accounts.sms.verifyCode = function (phone, code) {
+  var user = Meteor.users.findOne({phone: phone});
+  if (!user) throw new Meteor.Error('Invalid phone number');
+
+  var validCode = codes.findOne({phone: phone, code: code});
+  if (!validCode) throw new Meteor.Error('Invalid verification code');
+
+  // Clear the verification code after a succesful login.
+  codes.remove({phone: phone});
+  return {userId: user._id};
+};
